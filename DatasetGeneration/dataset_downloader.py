@@ -104,7 +104,7 @@ DATASET_CONFIGS = {
         "description": "Movie clapper text dataset (~94K word instances)",
         "urls": {
             # Official ClapperText from Zenodo (linty5/ClapperText)
-            "dataset": "https://zenodo.org/records/17366964/files/ClapperText_v1.0.0.zip?download=1",
+            "dataset": "https://zenodo.org/records/17366964/files/clappertext.zip?download=1",
             # Fallback GitHub repo
             "github": "https://github.com/linty5/ClapperText/archive/refs/heads/main.zip",
         },
@@ -523,7 +523,7 @@ The automatic download failed. Please download manually:
 
 ## Option 1: Zenodo (Official)
 1. Visit: https://zenodo.org/records/17366964
-2. Download ClapperText_v1.0.0.zip
+2. Download clappertext.zip
 3. Extract to this directory
 
 ## Option 2: GitHub
