@@ -9,12 +9,15 @@ requests>=2.25.0
 
 # For CORD-v2 download from HuggingFace
 datasets>=2.0.0
+huggingface_hub>=0.14.0
 
-# For Google Drive downloads (optional)
+# For Google Drive downloads
 gdown>=4.0.0
 
-# For Open Images download (optional)
-# fiftyone>=0.20.0
+# For image processing
+scipy>=1.7.0
+shapely>=2.0.0
 
-# For SynthText .mat files (optional)
-# scipy>=1.7.0
+# Optional: For faster Open Images download
+# fiftyone>=0.20.0
+# boto3>=1.26.0  # For AWS S3 access

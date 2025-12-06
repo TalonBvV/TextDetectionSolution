@@ -6,15 +6,17 @@ Complete pipeline to generate training data for the PatchFormer text detection m
 
 This pipeline downloads, converts, merges, augments, and prepares text detection datasets for training. It produces a unified dataset format optimized for the PatchFormer v2 model.
 
+**The download script automatically downloads ALL required files including images.**
+
 ## Supported Datasets
 
-| Dataset | Description | Source |
-|---------|-------------|--------|
-| **HierText** | Google's hierarchical text dataset | Open Images |
-| **COCO-Text v2** | Text annotations for MS COCO | COCO 2014 |
-| **TextOCR** | Facebook's large-scale OCR dataset | Open Images |
-| **ClapperText** | Movie clapper text dataset | GitHub |
-| **CORD-v2** | Naver's receipt OCR dataset | HuggingFace |
+| Dataset | Description | Source | Size |
+|---------|-------------|--------|------|
+| **HierText** | Google's hierarchical text dataset | Open Images | ~12K images |
+| **COCO-Text v2** | Text annotations for MS COCO | COCO 2014 | ~63K images, 19GB |
+| **TextOCR** | Facebook's large-scale OCR dataset | Open Images | ~28K images |
+| **ClapperText** | Movie clapper text dataset | Zenodo | ~94K word instances |
+| **CORD-v2** | Naver's receipt OCR dataset | HuggingFace | ~11K images |
 
 ## Installation
 
@@ -43,13 +45,20 @@ python gen_dataset.py --output_dir ./dataset --run-all --max-samples 100
 ## Pipeline Stages
 
 ### 1. Download
-Downloads datasets from their sources.
+Downloads datasets from their sources **including all images**.
 
 ```bash
 python dataset_downloader.py --output_dir ./raw_datasets --datasets all
 ```
 
-**Note:** Some datasets (HierText, TextOCR) require Open Images images which need separate download due to size.
+**What gets downloaded:**
+- **HierText**: Annotations + images from Open Images (~12K images)
+- **COCO-Text**: Annotations + COCO 2014 images (~19GB)
+- **TextOCR**: Annotations + images from Open Images (~28K images)
+- **ClapperText**: Dataset from Zenodo
+- **CORD-v2**: Full dataset from HuggingFace (~11K images)
+
+⚠️ **Note:** Full download requires ~50GB+ of disk space and may take several hours.
 
 ### 2. Merge
 Converts each dataset to unified format and combines them.

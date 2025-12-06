@@ -1,12 +1,14 @@
 """
 Dataset Downloader for Text Detection Training.
 
-Downloads and extracts the following datasets:
-- HierText (Google's hierarchical text dataset)
-- COCO-Text v2 (Text annotations for COCO images)
-- TextOCR (Facebook's OCR dataset)
-- ClapperText (Movie clapper text dataset)
-- CORD-v2 (Naver's receipt OCR dataset)
+Downloads and extracts the following datasets with FULL IMAGE SUPPORT:
+- HierText (Google's hierarchical text dataset) + Open Images images
+- COCO-Text v2 (Text annotations for COCO images) + COCO 2014 images
+- TextOCR (Facebook's OCR dataset) + Open Images images
+- ClapperText (Movie clapper text dataset from Zenodo)
+- CORD-v2 (Naver's receipt OCR dataset from HuggingFace)
+
+This script downloads ALL required files including images.
 
 Usage:
     python dataset_downloader.py --output_dir ./raw_datasets --datasets all
@@ -16,15 +18,18 @@ Usage:
 import os
 import sys
 import json
+import gzip
 import shutil
 import argparse
 import zipfile
 import tarfile
 import requests
+import subprocess
 from pathlib import Path
 from tqdm import tqdm
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 # Try importing optional dependencies
 try:
@@ -43,6 +48,14 @@ except ImportError:
     print("Warning: 'gdown' library not available. Some Google Drive downloads may fail.")
     print("Install with: pip install gdown")
 
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("Warning: 'Pillow' not available. Some image processing may fail.")
+    print("Install with: pip install Pillow")
+
 
 # ============================================================================
 # Dataset Download URLs and Configurations
@@ -51,22 +64,20 @@ except ImportError:
 DATASET_CONFIGS = {
     "hiertext": {
         "name": "HierText",
-        "description": "Google's hierarchical text detection dataset",
+        "description": "Google's hierarchical text detection dataset (~12K images)",
         "urls": {
             "train": "https://github.com/google-research-datasets/hiertext/raw/main/gt/train.jsonl.gz",
             "val": "https://github.com/google-research-datasets/hiertext/raw/main/gt/validation.jsonl.gz",
-            # Images need to be downloaded from Open Images Dataset
-            "images_info": "https://raw.githubusercontent.com/google-research-datasets/hiertext/main/README.md"
         },
         "requires_open_images": True,
         "format": "jsonl",
     },
     "cocotext": {
         "name": "COCO-Text v2",
-        "description": "Text annotations for MS COCO images",
+        "description": "Text annotations for MS COCO images (~63K images, 19GB)",
         "urls": {
             "annotations": "https://github.com/bgshih/cocotext/releases/download/dl/cocotext.v2.zip",
-            # COCO images from official source
+            # COCO 2014 images - these ARE required
             "train_images": "http://images.cocodataset.org/zips/train2014.zip",
             "val_images": "http://images.cocodataset.org/zips/val2014.zip",
         },
@@ -74,32 +85,37 @@ DATASET_CONFIGS = {
     },
     "textocr": {
         "name": "TextOCR",
-        "description": "Facebook's large-scale OCR dataset",
+        "description": "Facebook's large-scale OCR dataset (~28K images)",
         "urls": {
             "annotations_train": "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_train.json",
             "annotations_val": "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_val.json",
-            # Uses OpenImages images
-            "images_info": "Uses Open Images V5 images"
         },
         "requires_open_images": True,
         "format": "json",
     },
     "clappertext": {
         "name": "ClapperText",
-        "description": "Movie clapper text dataset",
+        "description": "Movie clapper text dataset (~94K word instances)",
         "urls": {
-            # ClapperText is typically hosted on academic servers or Kaggle
-            "dataset": "https://github.com/vishwanathkasturi/clappertext/archive/refs/heads/main.zip"
+            # Official ClapperText from Zenodo (linty5/ClapperText)
+            "dataset": "https://zenodo.org/records/17366964/files/ClapperText_v1.0.0.zip?download=1",
+            # Fallback GitHub repo
+            "github": "https://github.com/linty5/ClapperText/archive/refs/heads/main.zip",
         },
-        "format": "custom",
-        "fallback_message": "ClapperText may require manual download from the original source."
+        "format": "zenodo",
     },
     "cord": {
         "name": "CORD-v2",
-        "description": "Naver's Consolidated Receipt Dataset",
+        "description": "Naver's Consolidated Receipt Dataset (~11K images)",
         "huggingface_id": "naver-clova-ix/cord-v2",
         "format": "huggingface",
     },
+}
+
+# Open Images base URLs
+OPEN_IMAGES_BASE_URLS = {
+    "s3": "https://s3.amazonaws.com/open-images-dataset",
+    "gcs": "https://storage.googleapis.com/cvdf-datasets/oid",
 }
 
 
@@ -224,7 +240,7 @@ class BaseDownloader:
 
 
 class HierTextDownloader(BaseDownloader):
-    """Download HierText dataset."""
+    """Download HierText dataset with images from Open Images."""
     
     def download(self) -> bool:
         print(f"\n{'='*60}")
@@ -236,67 +252,107 @@ class HierTextDownloader(BaseDownloader):
         gt_dir.mkdir(exist_ok=True)
         
         # Download annotations
+        image_ids_by_split = {}
         for split, url in [("train", self.config["urls"]["train"]), 
-                           ("val", self.config["urls"]["val"])]:
+                           ("validation", self.config["urls"]["val"])]:
             gz_path = gt_dir / f"{split}.jsonl.gz"
             jsonl_path = gt_dir / f"{split}.jsonl"
             
-            if jsonl_path.exists():
-                print(f"  {split}.jsonl already exists, skipping...")
-                continue
+            if not jsonl_path.exists():
+                print(f"  Downloading {split} annotations...")
+                if download_file(url, gz_path, desc=f"HierText {split}"):
+                    decompress_gzip(gz_path, jsonl_path)
+                    if gz_path.exists():
+                        gz_path.unlink()
             
-            print(f"  Downloading {split} annotations...")
-            if download_file(url, gz_path, desc=f"HierText {split}"):
-                decompress_gzip(gz_path, jsonl_path)
-                gz_path.unlink()  # Remove compressed file
+            # Extract image IDs from annotations
+            if jsonl_path.exists():
+                image_ids = set()
+                with open(jsonl_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            data = json.loads(line.strip())
+                            # HierText uses image_id field
+                            if 'image_id' in data:
+                                image_ids.add(data['image_id'])
+                        except json.JSONDecodeError:
+                            continue
+                image_ids_by_split[split] = image_ids
+                print(f"    Found {len(image_ids)} images for {split}")
         
-        # Create instructions for Open Images download
-        instructions_path = self.dataset_dir / "DOWNLOAD_IMAGES.md"
-        with open(instructions_path, 'w') as f:
-            f.write("""# HierText Image Download Instructions
-
-HierText uses images from the Open Images Dataset. To download:
-
-## Option 1: Using FiftyOne (Recommended)
-```bash
-pip install fiftyone
-python -c "
-import fiftyone.zoo as foz
-# Download Open Images v6 train and validation splits
-dataset = foz.load_zoo_dataset('open-images-v6', split='train', max_samples=50000)
-"
-```
-
-## Option 2: Using AWS CLI
-```bash
-# Install AWS CLI
-pip install awscli
-
-# Download images (requires image IDs from HierText annotations)
-aws s3 --no-sign-request sync s3://open-images-dataset/train images/train/
-aws s3 --no-sign-request sync s3://open-images-dataset/validation images/val/
-```
-
-## Option 3: Using the official downloader
-```bash
-pip install openimages
-openimages downloader --download_folder=./images --csv_dir=./metadata train
-```
-
-After downloading, place images in:
-- {dataset_dir}/images/train/
-- {dataset_dir}/images/val/
-""")
+        # Download images from Open Images
+        images_dir = self.dataset_dir / "images"
+        images_dir.mkdir(exist_ok=True)
         
-        print(f"  ✓ Annotations downloaded")
-        print(f"  ⚠ Images require separate download from Open Images")
-        print(f"    See: {instructions_path}")
+        total_images = sum(len(ids) for ids in image_ids_by_split.values())
+        print(f"\n  Downloading {total_images} images from Open Images...")
         
+        for split, image_ids in image_ids_by_split.items():
+            split_dir = images_dir / split
+            split_dir.mkdir(exist_ok=True)
+            
+            # Map HierText split names to Open Images split names
+            oi_split = "train" if split == "train" else "validation"
+            
+            self._download_open_images(image_ids, split_dir, oi_split)
+        
+        print(f"  ✓ HierText download complete")
         return True
+    
+    def _download_open_images(self, image_ids: Set[str], output_dir: Path, 
+                               split: str, max_workers: int = 8) -> int:
+        """Download images from Open Images dataset."""
+        
+        def download_single(image_id: str) -> bool:
+            dest = output_dir / f"{image_id}.jpg"
+            if dest.exists():
+                return True
+            
+            # Try S3 first, then GCS
+            urls = [
+                f"{OPEN_IMAGES_BASE_URLS['s3']}/{split}/{image_id}.jpg",
+                f"https://s3.amazonaws.com/open-images-dataset/{split}/{image_id}.jpg",
+            ]
+            
+            for url in urls:
+                try:
+                    response = requests.get(url, timeout=30)
+                    if response.status_code == 200:
+                        with open(dest, 'wb') as f:
+                            f.write(response.content)
+                        return True
+                except:
+                    continue
+            return False
+        
+        # Filter out already downloaded
+        to_download = [img_id for img_id in image_ids 
+                       if not (output_dir / f"{img_id}.jpg").exists()]
+        
+        if not to_download:
+            print(f"    All {len(image_ids)} images already downloaded for {split}")
+            return len(image_ids)
+        
+        print(f"    Downloading {len(to_download)} images for {split}...")
+        
+        success_count = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(download_single, img_id): img_id 
+                      for img_id in to_download}
+            
+            for future in tqdm(as_completed(futures), total=len(futures), 
+                             desc=f"Open Images {split}"):
+                if future.result():
+                    success_count += 1
+        
+        already_had = len(image_ids) - len(to_download)
+        print(f"    Downloaded {success_count}/{len(to_download)} new images "
+              f"({already_had} already existed)")
+        return success_count + already_had
 
 
 class COCOTextDownloader(BaseDownloader):
-    """Download COCO-Text v2 dataset."""
+    """Download COCO-Text v2 dataset with COCO 2014 images."""
     
     def download(self) -> bool:
         print(f"\n{'='*60}")
@@ -309,55 +365,26 @@ class COCOTextDownloader(BaseDownloader):
         annotations_zip = self.dataset_dir / "cocotext.v2.zip"
         annotations_dir = self.dataset_dir / "annotations"
         
-        if not annotations_dir.exists():
+        if not annotations_dir.exists() or not any(annotations_dir.iterdir()):
             print("  Downloading annotations...")
             if download_file(self.config["urls"]["annotations"], annotations_zip, 
                            desc="COCO-Text annotations"):
                 extract_archive(annotations_zip, annotations_dir)
-                annotations_zip.unlink()
+                if annotations_zip.exists():
+                    annotations_zip.unlink()
         else:
             print("  Annotations already exist, skipping...")
         
-        # Create instructions for COCO images
-        instructions_path = self.dataset_dir / "DOWNLOAD_IMAGES.md"
-        with open(instructions_path, 'w') as f:
-            f.write("""# COCO Images Download Instructions
-
-COCO-Text uses images from MS COCO 2014. Download options:
-
-## Option 1: Direct Download (13GB train + 6GB val)
-```bash
-# Train images
-wget http://images.cocodataset.org/zips/train2014.zip
-unzip train2014.zip -d images/
-
-# Validation images
-wget http://images.cocodataset.org/zips/val2014.zip
-unzip val2014.zip -d images/
-```
-
-## Option 2: Using COCO API
-```bash
-pip install pycocotools
-# Then use the COCO API to download specific images
-```
-
-After downloading, ensure structure:
-- {dataset_dir}/images/train2014/
-- {dataset_dir}/images/val2014/
-""")
+        # ALWAYS download COCO images - they are required
+        print("\n  Downloading COCO 2014 images (required, ~19GB total)...")
+        print("  This may take a while depending on your connection...")
+        self._download_coco_images()
         
-        # Optionally download images (large files)
-        images_dir = self.dataset_dir / "images"
-        if not images_dir.exists():
-            print("  ⚠ COCO images are large (19GB total)")
-            print(f"    See: {instructions_path}")
-            print("  To auto-download images, run with --download-images flag")
-        
+        print(f"  ✓ COCO-Text v2 download complete")
         return True
     
-    def download_images(self) -> bool:
-        """Download COCO images (optional, large files)."""
+    def _download_coco_images(self) -> bool:
+        """Download COCO 2014 images."""
         images_dir = self.dataset_dir / "images"
         images_dir.mkdir(exist_ok=True)
         
@@ -366,20 +393,23 @@ After downloading, ensure structure:
             zip_path = images_dir / f"{split}2014.zip"
             extract_dir = images_dir / f"{split}2014"
             
-            if extract_dir.exists():
-                print(f"  {split}2014 images already exist, skipping...")
+            if extract_dir.exists() and any(extract_dir.glob("*.jpg")):
+                existing = len(list(extract_dir.glob("*.jpg")))
+                print(f"    {split}2014: {existing} images already exist, skipping...")
                 continue
             
-            print(f"  Downloading {split}2014 images (this may take a while)...")
+            print(f"    Downloading {split}2014 images...")
             if download_file(url, zip_path, desc=f"COCO {split}2014"):
+                print(f"    Extracting {split}2014...")
                 extract_archive(zip_path, images_dir)
-                zip_path.unlink()
+                if zip_path.exists():
+                    zip_path.unlink()
         
         return True
 
 
 class TextOCRDownloader(BaseDownloader):
-    """Download TextOCR dataset."""
+    """Download TextOCR dataset with images from Open Images."""
     
     def download(self) -> bool:
         print(f"\n{'='*60}")
@@ -390,40 +420,114 @@ class TextOCRDownloader(BaseDownloader):
         annotations_dir = self.dataset_dir / "annotations"
         annotations_dir.mkdir(exist_ok=True)
         
-        # Download annotations
+        # Download annotations and collect image IDs
+        image_ids_by_split = {}
+        
         for split in ["train", "val"]:
             url = self.config["urls"][f"annotations_{split}"]
             dest = annotations_dir / f"TextOCR_0.1_{split}.json"
             
-            if dest.exists():
-                print(f"  {split} annotations already exist, skipping...")
-                continue
+            if not dest.exists():
+                print(f"  Downloading {split} annotations...")
+                download_file(url, dest, desc=f"TextOCR {split}")
+            else:
+                print(f"  {split} annotations already exist")
             
-            print(f"  Downloading {split} annotations...")
-            download_file(url, dest, desc=f"TextOCR {split}")
+            # Extract image IDs from annotations
+            if dest.exists():
+                image_ids = set()
+                try:
+                    with open(dest, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        # TextOCR format: has 'imgs' dict with image_id -> image_info
+                        if 'imgs' in data:
+                            for img_id, img_info in data['imgs'].items():
+                                # Image IDs in TextOCR reference Open Images
+                                image_ids.add(img_id)
+                        # Also check 'data' key
+                        elif 'data' in data:
+                            for item in data['data']:
+                                if 'image_id' in item:
+                                    image_ids.add(str(item['image_id']))
+                except Exception as e:
+                    print(f"    Warning: Could not parse {split} annotations: {e}")
+                
+                image_ids_by_split[split] = image_ids
+                print(f"    Found {len(image_ids)} images for {split}")
         
-        # Instructions for Open Images
-        instructions_path = self.dataset_dir / "DOWNLOAD_IMAGES.md"
-        with open(instructions_path, 'w') as f:
-            f.write("""# TextOCR Image Download Instructions
-
-TextOCR uses images from Open Images V5. See HierText instructions for download options.
-
-The images are shared with HierText - if you've already downloaded Open Images for HierText,
-you can symlink or copy the images here.
-
-After downloading, place images in:
-- {dataset_dir}/images/
-""")
+        # Download images from Open Images
+        images_dir = self.dataset_dir / "images"
+        images_dir.mkdir(exist_ok=True)
         
-        print(f"  ✓ Annotations downloaded")
-        print(f"  ⚠ Images require Open Images download")
+        total_images = sum(len(ids) for ids in image_ids_by_split.values())
+        print(f"\n  Downloading {total_images} images from Open Images...")
         
+        # TextOCR uses train split from Open Images for both train and val
+        all_image_ids = set()
+        for ids in image_ids_by_split.values():
+            all_image_ids.update(ids)
+        
+        self._download_open_images(all_image_ids, images_dir, "train")
+        
+        print(f"  ✓ TextOCR download complete")
         return True
+    
+    def _download_open_images(self, image_ids: Set[str], output_dir: Path, 
+                               split: str, max_workers: int = 8) -> int:
+        """Download images from Open Images dataset."""
+        
+        def download_single(image_id: str) -> bool:
+            dest = output_dir / f"{image_id}.jpg"
+            if dest.exists():
+                return True
+            
+            # Try multiple URL patterns
+            urls = [
+                f"https://s3.amazonaws.com/open-images-dataset/{split}/{image_id}.jpg",
+                f"https://s3.amazonaws.com/open-images-dataset/train/{image_id}.jpg",
+                f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg",
+                f"https://s3.amazonaws.com/open-images-dataset/test/{image_id}.jpg",
+            ]
+            
+            for url in urls:
+                try:
+                    response = requests.get(url, timeout=30)
+                    if response.status_code == 200:
+                        with open(dest, 'wb') as f:
+                            f.write(response.content)
+                        return True
+                except:
+                    continue
+            return False
+        
+        # Filter out already downloaded
+        to_download = [img_id for img_id in image_ids 
+                       if not (output_dir / f"{img_id}.jpg").exists()]
+        
+        if not to_download:
+            print(f"    All {len(image_ids)} images already downloaded")
+            return len(image_ids)
+        
+        print(f"    Downloading {len(to_download)} images...")
+        
+        success_count = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(download_single, img_id): img_id 
+                      for img_id in to_download}
+            
+            for future in tqdm(as_completed(futures), total=len(futures), 
+                             desc="Open Images"):
+                if future.result():
+                    success_count += 1
+        
+        already_had = len(image_ids) - len(to_download)
+        print(f"    Downloaded {success_count}/{len(to_download)} new images "
+              f"({already_had} already existed)")
+        return success_count + already_had
 
 
 class ClapperTextDownloader(BaseDownloader):
-    """Download ClapperText dataset."""
+    """Download ClapperText dataset from Zenodo."""
     
     def download(self) -> bool:
         print(f"\n{'='*60}")
@@ -432,19 +536,35 @@ class ClapperTextDownloader(BaseDownloader):
         
         self.dataset_dir.mkdir(parents=True, exist_ok=True)
         
-        # Try GitHub download
+        # Try Zenodo download first (official source)
         zip_path = self.dataset_dir / "clappertext.zip"
+        success = False
         
-        print("  Attempting to download from GitHub...")
+        print("  Attempting to download from Zenodo (official)...")
         success = download_file(
             self.config["urls"]["dataset"], 
             zip_path,
-            desc="ClapperText"
+            desc="ClapperText Zenodo"
         )
         
+        # Fallback to GitHub if Zenodo fails
+        if not success or not zip_path.exists():
+            print("  Zenodo download failed, trying GitHub fallback...")
+            success = download_file(
+                self.config["urls"]["github"], 
+                zip_path,
+                desc="ClapperText GitHub"
+            )
+        
         if success and zip_path.exists():
+            print("  Extracting...")
             extract_archive(zip_path, self.dataset_dir)
-            zip_path.unlink()
+            if zip_path.exists():
+                zip_path.unlink()
+            
+            # Organize files if needed
+            self._organize_files()
+            
             print("  ✓ ClapperText downloaded")
             return True
         else:
@@ -455,16 +575,57 @@ class ClapperTextDownloader(BaseDownloader):
 
 The automatic download failed. Please download manually:
 
-1. Visit: https://github.com/vishwanathkasturi/clappertext
-2. Or search for "ClapperText dataset" on academic dataset repositories
-3. Extract contents to this directory
+## Option 1: Zenodo (Official)
+1. Visit: https://zenodo.org/records/17366964
+2. Download ClapperText_v1.0.0.zip
+3. Extract to this directory
 
-Expected structure:
+## Option 2: GitHub
+1. Visit: https://github.com/linty5/ClapperText
+2. Clone or download the repository
+3. Follow their instructions to access the data
+
+## Option 3: HISTORIAN Source Videos
+ClapperText is derived from the HISTORIAN dataset:
+1. Visit: https://zenodo.org/record/6644516
+2. Download source videos and extract frames
+
+Expected structure after download:
 - {dataset_dir}/images/
 - {dataset_dir}/annotations/
 """)
             print(f"  ⚠ Auto-download failed. See: {instructions_path}")
             return False
+    
+    def _organize_files(self):
+        """Organize extracted files into standard structure."""
+        images_dir = self.dataset_dir / "images"
+        annotations_dir = self.dataset_dir / "annotations"
+        
+        # Look for common extracted folder patterns
+        for extracted_dir in self.dataset_dir.iterdir():
+            if extracted_dir.is_dir() and extracted_dir.name not in ['images', 'annotations']:
+                # Check if this contains images or annotations
+                if (extracted_dir / 'images').exists():
+                    if not images_dir.exists():
+                        shutil.move(str(extracted_dir / 'images'), str(images_dir))
+                if (extracted_dir / 'annotations').exists():
+                    if not annotations_dir.exists():
+                        shutil.move(str(extracted_dir / 'annotations'), str(annotations_dir))
+                
+                # Also check for image files directly
+                image_files = list(extracted_dir.glob('*.jpg')) + list(extracted_dir.glob('*.png'))
+                if image_files and not images_dir.exists():
+                    images_dir.mkdir(exist_ok=True)
+                    for img in image_files:
+                        shutil.move(str(img), str(images_dir / img.name))
+                
+                # Check for JSON annotation files
+                json_files = list(extracted_dir.glob('*.json'))
+                if json_files and not annotations_dir.exists():
+                    annotations_dir.mkdir(exist_ok=True)
+                    for jf in json_files:
+                        shutil.move(str(jf), str(annotations_dir / jf.name))
 
 
 class CORDDownloader(BaseDownloader):
