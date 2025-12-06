@@ -51,14 +51,19 @@ Downloads datasets from their sources **including all images**.
 python dataset_downloader.py --output_dir ./raw_datasets --datasets all
 ```
 
-**What gets downloaded:**
-- **HierText**: Annotations + images from Open Images (~12K images)
-- **COCO-Text**: Annotations + COCO 2014 images (~19GB)
-- **TextOCR**: Annotations + images from Open Images (~28K images)
-- **ClapperText**: Dataset from Zenodo
+**What gets downloaded (from official sources):**
+- **HierText**: Annotations (GitHub) + images from CVDF OCR bucket as .tgz (~12K images)
+  - Source: `s3://open-images-dataset/ocr/{train,validation,test}.tgz`
+- **COCO-Text**: Annotations (GitHub) + COCO 2014 images (~63K images, ~19GB)
+  - Source: `images.cocodataset.org`
+- **TextOCR**: Annotations + images from Facebook servers (~28K images)
+  - Source: `dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip`
+- **ClapperText**: Full dataset from Zenodo
+  - Source: `zenodo.org/records/17366964`
 - **CORD-v2**: Full dataset from HuggingFace (~11K images)
+  - Source: HuggingFace Hub
 
-⚠️ **Note:** Full download requires ~50GB+ of disk space and may take several hours.
+⚠️ **Note:** Full download requires ~60GB+ of disk space and may take several hours.
 
 ### 2. Merge
 Converts each dataset to unified format and combines them.

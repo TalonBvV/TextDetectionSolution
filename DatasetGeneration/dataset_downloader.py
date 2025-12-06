@@ -66,10 +66,14 @@ DATASET_CONFIGS = {
         "name": "HierText",
         "description": "Google's hierarchical text detection dataset (~12K images)",
         "urls": {
+            # Annotations from GitHub
             "train": "https://github.com/google-research-datasets/hiertext/raw/main/gt/train.jsonl.gz",
             "val": "https://github.com/google-research-datasets/hiertext/raw/main/gt/validation.jsonl.gz",
+            # Images from CVDF OCR bucket (official source per HierText docs)
+            "train_images": "https://s3.amazonaws.com/open-images-dataset/ocr/train.tgz",
+            "val_images": "https://s3.amazonaws.com/open-images-dataset/ocr/validation.tgz",
+            "test_images": "https://s3.amazonaws.com/open-images-dataset/ocr/test.tgz",
         },
-        "requires_open_images": True,
         "format": "jsonl",
     },
     "cocotext": {
@@ -77,7 +81,7 @@ DATASET_CONFIGS = {
         "description": "Text annotations for MS COCO images (~63K images, 19GB)",
         "urls": {
             "annotations": "https://github.com/bgshih/cocotext/releases/download/dl/cocotext.v2.zip",
-            # COCO 2014 images - these ARE required
+            # COCO 2014 images (required)
             "train_images": "http://images.cocodataset.org/zips/train2014.zip",
             "val_images": "http://images.cocodataset.org/zips/val2014.zip",
         },
@@ -87,10 +91,12 @@ DATASET_CONFIGS = {
         "name": "TextOCR",
         "description": "Facebook's large-scale OCR dataset (~28K images)",
         "urls": {
+            # Annotations
             "annotations_train": "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_train.json",
             "annotations_val": "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_val.json",
+            # Images from Facebook (official source)
+            "images": "https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip",
         },
-        "requires_open_images": True,
         "format": "json",
     },
     "clappertext": {
@@ -110,12 +116,6 @@ DATASET_CONFIGS = {
         "huggingface_id": "naver-clova-ix/cord-v2",
         "format": "huggingface",
     },
-}
-
-# Open Images base URLs
-OPEN_IMAGES_BASE_URLS = {
-    "s3": "https://s3.amazonaws.com/open-images-dataset",
-    "gcs": "https://storage.googleapis.com/cvdf-datasets/oid",
 }
 
 
@@ -240,7 +240,14 @@ class BaseDownloader:
 
 
 class HierTextDownloader(BaseDownloader):
-    """Download HierText dataset with images from Open Images."""
+    """Download HierText dataset with images from CVDF OCR bucket."""
+    
+    # Official HierText image URLs from CVDF (as per official docs)
+    IMAGE_URLS = {
+        "train": "https://s3.amazonaws.com/open-images-dataset/ocr/train.tgz",
+        "validation": "https://s3.amazonaws.com/open-images-dataset/ocr/validation.tgz",
+        "test": "https://s3.amazonaws.com/open-images-dataset/ocr/test.tgz",
+    }
     
     def download(self) -> bool:
         print(f"\n{'='*60}")
@@ -252,7 +259,6 @@ class HierTextDownloader(BaseDownloader):
         gt_dir.mkdir(exist_ok=True)
         
         # Download annotations
-        image_ids_by_split = {}
         for split, url in [("train", self.config["urls"]["train"]), 
                            ("validation", self.config["urls"]["val"])]:
             gz_path = gt_dir / f"{split}.jsonl.gz"
@@ -260,95 +266,78 @@ class HierTextDownloader(BaseDownloader):
             
             if not jsonl_path.exists():
                 print(f"  Downloading {split} annotations...")
-                if download_file(url, gz_path, desc=f"HierText {split}"):
+                if download_file(url, gz_path, desc=f"HierText {split} annotations"):
                     decompress_gzip(gz_path, jsonl_path)
                     if gz_path.exists():
                         gz_path.unlink()
-            
-            # Extract image IDs from annotations
-            if jsonl_path.exists():
-                image_ids = set()
-                with open(jsonl_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        try:
-                            data = json.loads(line.strip())
-                            # HierText uses image_id field
-                            if 'image_id' in data:
-                                image_ids.add(data['image_id'])
-                        except json.JSONDecodeError:
-                            continue
-                image_ids_by_split[split] = image_ids
-                print(f"    Found {len(image_ids)} images for {split}")
+            else:
+                print(f"  {split} annotations already exist")
         
-        # Download images from Open Images
+        # Download images from official CVDF OCR bucket (as tarballs)
         images_dir = self.dataset_dir / "images"
         images_dir.mkdir(exist_ok=True)
         
-        total_images = sum(len(ids) for ids in image_ids_by_split.values())
-        print(f"\n  Downloading {total_images} images from Open Images...")
+        print(f"\n  Downloading images from CVDF OCR bucket...")
+        print(f"  (This is the official source as per HierText documentation)")
         
-        for split, image_ids in image_ids_by_split.items():
+        for split in ["train", "validation", "test"]:
             split_dir = images_dir / split
-            split_dir.mkdir(exist_ok=True)
             
-            # Map HierText split names to Open Images split names
-            oi_split = "train" if split == "train" else "validation"
+            # Check if already extracted
+            if split_dir.exists() and any(split_dir.glob("*.jpg")):
+                existing = len(list(split_dir.glob("*.jpg")))
+                print(f"    {split}: {existing} images already exist, skipping...")
+                continue
             
-            self._download_open_images(image_ids, split_dir, oi_split)
+            # Download tarball
+            tgz_path = self.dataset_dir / f"{split}.tgz"
+            url = self.IMAGE_URLS[split]
+            
+            print(f"    Downloading {split} images...")
+            if not tgz_path.exists():
+                success = download_file(url, tgz_path, desc=f"HierText {split} images")
+                if not success:
+                    print(f"    ⚠ Failed to download {split} images")
+                    # Try alternative: AWS CLI
+                    self._try_aws_download(split, tgz_path)
+            
+            # Extract tarball
+            if tgz_path.exists():
+                print(f"    Extracting {split} images...")
+                self._extract_tarball(tgz_path, images_dir)
+                # Clean up tarball to save space
+                tgz_path.unlink()
         
         print(f"  ✓ HierText download complete")
         return True
     
-    def _download_open_images(self, image_ids: Set[str], output_dir: Path, 
-                               split: str, max_workers: int = 8) -> int:
-        """Download images from Open Images dataset."""
-        
-        def download_single(image_id: str) -> bool:
-            dest = output_dir / f"{image_id}.jpg"
-            if dest.exists():
-                return True
-            
-            # Try S3 first, then GCS
-            urls = [
-                f"{OPEN_IMAGES_BASE_URLS['s3']}/{split}/{image_id}.jpg",
-                f"https://s3.amazonaws.com/open-images-dataset/{split}/{image_id}.jpg",
+    def _try_aws_download(self, split: str, dest_path: Path) -> bool:
+        """Try downloading using AWS CLI as fallback."""
+        print(f"    Trying AWS CLI fallback for {split}...")
+        try:
+            cmd = [
+                "aws", "s3", "--no-sign-request", "cp",
+                f"s3://open-images-dataset/ocr/{split}.tgz",
+                str(dest_path)
             ]
-            
-            for url in urls:
-                try:
-                    response = requests.get(url, timeout=30)
-                    if response.status_code == 200:
-                        with open(dest, 'wb') as f:
-                            f.write(response.content)
-                        return True
-                except:
-                    continue
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return result.returncode == 0
+        except FileNotFoundError:
+            print(f"    AWS CLI not installed. Install with: pip install awscli")
             return False
-        
-        # Filter out already downloaded
-        to_download = [img_id for img_id in image_ids 
-                       if not (output_dir / f"{img_id}.jpg").exists()]
-        
-        if not to_download:
-            print(f"    All {len(image_ids)} images already downloaded for {split}")
-            return len(image_ids)
-        
-        print(f"    Downloading {len(to_download)} images for {split}...")
-        
-        success_count = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(download_single, img_id): img_id 
-                      for img_id in to_download}
-            
-            for future in tqdm(as_completed(futures), total=len(futures), 
-                             desc=f"Open Images {split}"):
-                if future.result():
-                    success_count += 1
-        
-        already_had = len(image_ids) - len(to_download)
-        print(f"    Downloaded {success_count}/{len(to_download)} new images "
-              f"({already_had} already existed)")
-        return success_count + already_had
+        except Exception as e:
+            print(f"    AWS CLI failed: {e}")
+            return False
+    
+    def _extract_tarball(self, tgz_path: Path, output_dir: Path) -> bool:
+        """Extract a .tgz tarball."""
+        try:
+            with tarfile.open(tgz_path, 'r:gz') as tar:
+                tar.extractall(output_dir)
+            return True
+        except Exception as e:
+            print(f"    Error extracting {tgz_path}: {e}")
+            return False
 
 
 class COCOTextDownloader(BaseDownloader):
@@ -409,7 +398,10 @@ class COCOTextDownloader(BaseDownloader):
 
 
 class TextOCRDownloader(BaseDownloader):
-    """Download TextOCR dataset with images from Open Images."""
+    """Download TextOCR dataset with images from Facebook's servers."""
+    
+    # Official TextOCR URLs from Facebook
+    IMAGES_URL = "https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip"
     
     def download(self) -> bool:
         print(f"\n{'='*60}")
@@ -420,110 +412,64 @@ class TextOCRDownloader(BaseDownloader):
         annotations_dir = self.dataset_dir / "annotations"
         annotations_dir.mkdir(exist_ok=True)
         
-        # Download annotations and collect image IDs
-        image_ids_by_split = {}
-        
+        # Download annotations
         for split in ["train", "val"]:
             url = self.config["urls"][f"annotations_{split}"]
             dest = annotations_dir / f"TextOCR_0.1_{split}.json"
             
             if not dest.exists():
                 print(f"  Downloading {split} annotations...")
-                download_file(url, dest, desc=f"TextOCR {split}")
+                download_file(url, dest, desc=f"TextOCR {split} annotations")
             else:
                 print(f"  {split} annotations already exist")
-            
-            # Extract image IDs from annotations
-            if dest.exists():
-                image_ids = set()
-                try:
-                    with open(dest, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        # TextOCR format: has 'imgs' dict with image_id -> image_info
-                        if 'imgs' in data:
-                            for img_id, img_info in data['imgs'].items():
-                                # Image IDs in TextOCR reference Open Images
-                                image_ids.add(img_id)
-                        # Also check 'data' key
-                        elif 'data' in data:
-                            for item in data['data']:
-                                if 'image_id' in item:
-                                    image_ids.add(str(item['image_id']))
-                except Exception as e:
-                    print(f"    Warning: Could not parse {split} annotations: {e}")
-                
-                image_ids_by_split[split] = image_ids
-                print(f"    Found {len(image_ids)} images for {split}")
         
-        # Download images from Open Images
+        # Download images from official Facebook URL
         images_dir = self.dataset_dir / "images"
-        images_dir.mkdir(exist_ok=True)
         
-        total_images = sum(len(ids) for ids in image_ids_by_split.values())
-        print(f"\n  Downloading {total_images} images from Open Images...")
-        
-        # TextOCR uses train split from Open Images for both train and val
-        all_image_ids = set()
-        for ids in image_ids_by_split.values():
-            all_image_ids.update(ids)
-        
-        self._download_open_images(all_image_ids, images_dir, "train")
+        # Check if images already extracted
+        if images_dir.exists() and any(images_dir.glob("*.jpg")):
+            existing = len(list(images_dir.glob("*.jpg")))
+            print(f"  Images already exist ({existing} files), skipping...")
+        else:
+            print(f"\n  Downloading images from Facebook servers...")
+            print(f"  (Official TextOCR/TextVQA image source)")
+            
+            zip_path = self.dataset_dir / "train_val_images.zip"
+            
+            if not zip_path.exists():
+                success = download_file(self.IMAGES_URL, zip_path, 
+                                       desc="TextOCR images")
+                if not success:
+                    print(f"  ⚠ Failed to download images")
+                    return False
+            
+            # Extract images
+            print(f"  Extracting images...")
+            images_dir.mkdir(exist_ok=True)
+            
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    # Extract with progress
+                    members = zf.namelist()
+                    for member in tqdm(members, desc="Extracting"):
+                        zf.extract(member, self.dataset_dir)
+                
+                # Move images to correct location if nested
+                extracted_dir = self.dataset_dir / "train_val_images"
+                if extracted_dir.exists():
+                    for img in extracted_dir.glob("*"):
+                        shutil.move(str(img), str(images_dir / img.name))
+                    extracted_dir.rmdir()
+                
+                # Clean up zip to save space
+                zip_path.unlink()
+                
+            except Exception as e:
+                print(f"  Error extracting: {e}")
+                return False
         
         print(f"  ✓ TextOCR download complete")
         return True
-    
-    def _download_open_images(self, image_ids: Set[str], output_dir: Path, 
-                               split: str, max_workers: int = 8) -> int:
-        """Download images from Open Images dataset."""
-        
-        def download_single(image_id: str) -> bool:
-            dest = output_dir / f"{image_id}.jpg"
-            if dest.exists():
-                return True
-            
-            # Try multiple URL patterns
-            urls = [
-                f"https://s3.amazonaws.com/open-images-dataset/{split}/{image_id}.jpg",
-                f"https://s3.amazonaws.com/open-images-dataset/train/{image_id}.jpg",
-                f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg",
-                f"https://s3.amazonaws.com/open-images-dataset/test/{image_id}.jpg",
-            ]
-            
-            for url in urls:
-                try:
-                    response = requests.get(url, timeout=30)
-                    if response.status_code == 200:
-                        with open(dest, 'wb') as f:
-                            f.write(response.content)
-                        return True
-                except:
-                    continue
-            return False
-        
-        # Filter out already downloaded
-        to_download = [img_id for img_id in image_ids 
-                       if not (output_dir / f"{img_id}.jpg").exists()]
-        
-        if not to_download:
-            print(f"    All {len(image_ids)} images already downloaded")
-            return len(image_ids)
-        
-        print(f"    Downloading {len(to_download)} images...")
-        
-        success_count = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(download_single, img_id): img_id 
-                      for img_id in to_download}
-            
-            for future in tqdm(as_completed(futures), total=len(futures), 
-                             desc="Open Images"):
-                if future.result():
-                    success_count += 1
-        
-        already_had = len(image_ids) - len(to_download)
-        print(f"    Downloaded {success_count}/{len(to_download)} new images "
-              f"({already_had} already existed)")
-        return success_count + already_had
 
 
 class ClapperTextDownloader(BaseDownloader):

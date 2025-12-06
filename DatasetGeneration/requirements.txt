@@ -18,6 +18,6 @@ gdown>=4.0.0
 scipy>=1.7.0
 shapely>=2.0.0
 
-# Optional: For faster Open Images download
-# fiftyone>=0.20.0
-# boto3>=1.26.0  # For AWS S3 access
+# Optional: For AWS S3 fallback downloads (HierText)
+# awscli>=1.27.0
+# boto3>=1.26.0
